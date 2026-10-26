@@ -13,20 +13,14 @@ import okhttp3.Response;
 import okhttp3.ResponseBody;
 
 /**
- * Downloads price data from the OSRS Wiki real-time prices API.
+ * Downloads price data from the OSRS Wiki real-time prices API (v2).
  * See https://oldschool.runescape.wiki/w/RuneScape:Real-time_Prices
  *
  * This only ever downloads public price data. It never sends anything about the player.
  */
 public class WikiPriceClient
 {
-	private static final String BASE_URL = "https://prices.runescape.wiki/api/v1/osrs";
-
-	/**
-	 * The wiki asks every tool to identify itself. Replace the contact part with your own
-	 * Discord name (or remove it) so the wiki team can reach you if something goes wrong.
-	 */
-	private static final String USER_AGENT = "Flip Assistant RuneLite plugin - contact: thetanburrito";
+	private static final String BASE_URL = "https://prices.runescape.wiki/api/v2/osrs";
 
 	private final OkHttpClient httpClient;
 	private final Gson gson;
@@ -45,15 +39,17 @@ public class WikiPriceClient
 		for (JsonElement element : array)
 		{
 			JsonObject o = element.getAsJsonObject();
-			Integer id = optInt(o, "id");
+			Long id = optLong(o, "id");
 			JsonElement name = o.get("name");
 			if (id == null || name == null || name.isJsonNull())
 			{
 				continue;
 			}
+			Long limit = optLong(o, "limit");
 			JsonElement members = o.get("members");
 			boolean isMembers = members != null && !members.isJsonNull() && members.getAsBoolean();
-			items.put(id, new ItemInfo(id, name.getAsString(), optInt(o, "limit"), isMembers));
+			items.put(id.intValue(), new ItemInfo(id.intValue(), name.getAsString(),
+				limit == null ? null : (int) Math.min(limit, Integer.MAX_VALUE), isMembers));
 		}
 		return items;
 	}
@@ -61,38 +57,44 @@ public class WikiPriceClient
 	/** Latest instant-buy and instant-sell price for every item. */
 	public Map<Integer, LatestPrice> fetchLatest() throws IOException
 	{
-		JsonObject data = get("/latest").getAsJsonObject().getAsJsonObject("data");
+		JsonObject data = dataOf(get("/latest"));
 		Map<Integer, LatestPrice> prices = new HashMap<>();
 		for (Map.Entry<String, JsonElement> entry : data.entrySet())
 		{
-			int id;
-			try
-			{
-				id = Integer.parseInt(entry.getKey());
-			}
-			catch (NumberFormatException e)
+			Integer id = parseId(entry.getKey());
+			if (id == null || !entry.getValue().isJsonObject())
 			{
 				continue;
 			}
 			JsonObject o = entry.getValue().getAsJsonObject();
-			prices.put(id, new LatestPrice(optInt(o, "high"), optLong(o, "highTime"), optInt(o, "low"), optLong(o, "lowTime")));
+			prices.put(id, new LatestPrice(optLong(o, "high"), optLong(o, "highTime"), optLong(o, "low"), optLong(o, "lowTime")));
 		}
 		return prices;
 	}
 
-	/** Average prices and volumes over the last hour for every item. */
+	/** Average prices and volumes over the most recent hour for every item. */
 	public Map<Integer, HourPrice> fetchHourly() throws IOException
 	{
-		JsonObject data = get("/1h").getAsJsonObject().getAsJsonObject("data");
+		return parseHourly(get("/1h"));
+	}
+
+	/**
+	 * Average prices and volumes for the hour starting at {@code hourStart} (Unix seconds, on the hour).
+	 * Returns an empty map if the wiki hasn't published that hour yet.
+	 */
+	public Map<Integer, HourPrice> fetchHourly(long hourStart) throws IOException
+	{
+		return parseHourly(get("/1h?timestamp=" + hourStart));
+	}
+
+	private Map<Integer, HourPrice> parseHourly(JsonElement json)
+	{
+		JsonObject data = dataOf(json);
 		Map<Integer, HourPrice> prices = new HashMap<>();
 		for (Map.Entry<String, JsonElement> entry : data.entrySet())
 		{
-			int id;
-			try
-			{
-				id = Integer.parseInt(entry.getKey());
-			}
-			catch (NumberFormatException e)
+			Integer id = parseId(entry.getKey());
+			if (id == null || !entry.getValue().isJsonObject())
 			{
 				continue;
 			}
@@ -100,8 +102,8 @@ public class WikiPriceClient
 			Long highVol = optLong(o, "highPriceVolume");
 			Long lowVol = optLong(o, "lowPriceVolume");
 			prices.put(id, new HourPrice(
-				optInt(o, "avgHighPrice"), highVol == null ? 0 : highVol,
-				optInt(o, "avgLowPrice"), lowVol == null ? 0 : lowVol));
+				optLong(o, "avgHighPrice"), highVol == null ? 0 : highVol,
+				optLong(o, "avgLowPrice"), lowVol == null ? 0 : lowVol));
 		}
 		return prices;
 	}
@@ -110,7 +112,7 @@ public class WikiPriceClient
 	{
 		Request request = new Request.Builder()
 			.url(BASE_URL + path)
-			.header("User-Agent", USER_AGENT)
+			.header("User-Agent", WikiContact.USER_AGENT)
 			.build();
 
 		try (Response response = httpClient.newCall(request).execute())
@@ -133,17 +135,32 @@ public class WikiPriceClient
 		}
 	}
 
-	/** Reads a whole number that may be missing, null, or written with decimals. */
-	private static Integer optInt(JsonObject o, String key)
+	private static JsonObject dataOf(JsonElement json)
 	{
-		JsonElement e = o.get(key);
-		if (e == null || e.isJsonNull())
+		if (json.isJsonObject())
+		{
+			JsonElement data = json.getAsJsonObject().get("data");
+			if (data != null && data.isJsonObject())
+			{
+				return data.getAsJsonObject();
+			}
+		}
+		return new JsonObject();
+	}
+
+	private static Integer parseId(String key)
+	{
+		try
+		{
+			return Integer.parseInt(key);
+		}
+		catch (NumberFormatException e)
 		{
 			return null;
 		}
-		return (int) Math.round(e.getAsDouble());
 	}
 
+	/** Reads a number that may be missing, null, or have decimals (v2 averages do), rounded to a whole number. */
 	private static Long optLong(JsonObject o, String key)
 	{
 		JsonElement e = o.get(key);
@@ -151,6 +168,13 @@ public class WikiPriceClient
 		{
 			return null;
 		}
-		return Math.round(e.getAsDouble());
+		try
+		{
+			return Math.round(e.getAsDouble());
+		}
+		catch (RuntimeException ex)
+		{
+			return null;
+		}
 	}
 }

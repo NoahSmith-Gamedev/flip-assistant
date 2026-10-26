@@ -35,6 +35,23 @@ final class Format
 		return gp(value);
 	}
 
+	/** 0.4 -> "<1m", 12.3 -> "12m", 95 -> "1h 35m", 600 -> "10h" */
+	static String duration(double minutes)
+	{
+		if (minutes < 1)
+		{
+			return "<1m";
+		}
+		long m = Math.round(minutes);
+		if (m < 60)
+		{
+			return "~" + m + "m";
+		}
+		long h = m / 60;
+		long rest = m % 60;
+		return rest == 0 ? "~" + h + "h" : "~" + h + "h " + rest + "m";
+	}
+
 	private static String trim(double v)
 	{
 		String s = String.format(Locale.US, "%.2f", v);
